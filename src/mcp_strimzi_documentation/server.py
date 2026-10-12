@@ -1,0 +1,184 @@
+"""FastMCP server for Strimzi documentation search and retrieval."""
+
+import json
+import logging
+import os
+from pathlib import Path
+
+from fastmcp import FastMCP
+
+from mcp_strimzi_documentation.database import DocumentDatabase
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Default database path
+DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "strimzi_docs.db"
+
+# Initialise FastMCP server
+mcp = FastMCP(name="strimzi-documentation")
+
+# Lazy database initialisation
+_database: DocumentDatabase | None = None
+
+
+def get_database() -> DocumentDatabase:
+    """Get or initialise the database instance.
+
+    Returns:
+        DocumentDatabase instance.
+    """
+    global _database
+    if _database is None:
+        db_path = Path(DEFAULT_DB_PATH)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        _database = DocumentDatabase(db_path)
+    return _database
+
+
+def _search_documentation_impl(
+    query: str,
+    section: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Core implementation of search_documentation.
+
+    Args:
+        query: Search terms to find in the documentation.
+        section: Optional section to filter results.
+        limit: Maximum number of results to return.
+
+    Returns:
+        JSON-formatted search results.
+    """
+    db = get_database()
+
+    # Validate and cap limit
+    limit = min(max(1, limit), 50)
+
+    results = db.search(query, section=section, limit=limit)
+
+    if not results:
+        return json.dumps(
+            {
+                "message": f"No results found for query: '{query}'",
+                "results": [],
+            }
+        )
+
+    output = {
+        "query": query,
+        "section_filter": section,
+        "result_count": len(results),
+        "results": [
+            {
+                "title": r.title,
+                "url": r.url,
+                "path": r.path,
+                "section": r.section,
+                "snippet": r.snippet,
+                "relevance_score": round(r.score, 4),
+            }
+            for r in results
+        ],
+    }
+
+    return json.dumps(output, indent=2)
+
+
+def _read_documentation_impl(path: str) -> str:
+    """Core implementation of read_documentation.
+
+    Args:
+        path: The relative path to the documentation file.
+
+    Returns:
+        JSON-formatted document content or error message.
+    """
+    db = get_database()
+    document = db.get_document(path)
+
+    if not document:
+        return json.dumps(
+            {
+                "error": f"Document not found: {path}",
+                "suggestion": "Use search_documentation to find valid document paths.",
+            }
+        )
+
+    return json.dumps(
+        {
+            "path": document.path,
+            "title": document.title,
+            "description": document.description,
+            "section": document.section,
+            "url": document.url,
+            "date": document.date,
+            "content": document.content,
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+def search_documentation(
+    query: str,
+    section: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Search Strimzi documentation by keyword query.
+
+    Args:
+        query: Search terms to find in the documentation. Supports
+               full-text search with stemming (e.g., "install" matches
+               "installing", "installation").
+        section: Optional section to filter results. Valid sections are:
+                 'operators' (deploying, configuring and overview books for
+                 the Strimzi operators), 'bridge' (HTTP Bridge book), 'blog'
+                 (blog posts), 'quickstarts', 'glossary' and 'contributing'.
+        limit: Maximum number of results to return (default: 10, max: 50).
+
+    Returns:
+        JSON-formatted search results with title, URL, snippet, and relevance score.
+    """
+    return _search_documentation_impl(query, section, limit)
+
+
+@mcp.tool()
+def read_documentation(path: str) -> str:
+    """Read the full content of a specific Strimzi documentation page.
+
+    Args:
+        path: The path of the documentation page as returned in search
+              results (e.g., 'quickstarts/minikube.md' or
+              'docs/operators/latest/deploying.md#cluster-operator-str').
+              A book path without an anchor (e.g.,
+              'docs/operators/latest/deploying.md') returns its table of
+              contents.
+
+    Returns:
+        The full markdown content of the documentation page, or an error
+        message if the page is not found.
+    """
+    return _read_documentation_impl(path)
+
+
+def run_server() -> None:
+    """Run the MCP server.
+
+    Transport defaults to stdio for backward compatibility with existing
+    per-session Docker invocations. Set MCP_TRANSPORT=http to run as a
+    long-lived HTTP server instead, optionally with MCP_HOST/MCP_PORT.
+    """
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        host = os.environ.get("MCP_HOST", "0.0.0.0")  # noqa: S104 (containerised server, host-mapped port)
+        port = int(os.environ.get("MCP_PORT", "8000"))
+        mcp.run(transport="http", host=host, port=port)
+
+
+if __name__ == "__main__":
+    run_server()

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "strimzi-docs": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp-strimzi-documentation"
+      ]
+    }
+  }
+}
